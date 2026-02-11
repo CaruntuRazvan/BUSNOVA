@@ -31,7 +31,6 @@ Sistemul utilizează un tabel asociativ complex pentru definirea succesiunii sta
 
 - **Gestiunea timpului prin offset-uri**  
   Sunt utilizați indici de decalaj pentru calcularea:
-
   - timpului estimat de sosire
   - timpului estimat de plecare  
     pentru fiecare stație intermediară.
@@ -73,6 +72,12 @@ Sistemul tratează ocuparea locurilor raportat strict la segmentul de drum parcu
   - disponibilitatea locului
   - suprapunerea segmentelor
   - consistența datelor
+
+---
+
+## 🗺️ Diagrama Conceptuală
+
+![Diagrama Conceptuală BUSNOVA](Anexe/FINAL.png)
 
 ---
 
