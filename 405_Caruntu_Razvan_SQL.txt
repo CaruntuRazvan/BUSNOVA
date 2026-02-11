@@ -1,0 +1,412 @@
+1.Să se calculeze rata de ocupare pentru fiecare cursă, comparând cu capacitatea maximă și medie a autobuzelor din flota.
+
+SELECT 
+    so.cursa_id,
+    so.ruta,
+    TO_CHAR(so.data_plecare, 'DD.MM.YYYY HH24:MI') AS plecare,
+    so.locuri_rezervate,
+    so.nr_rezervari_totale,  -- NOU: total rezervări
+    so.capacitate_autobuz,
+    ROUND((so.locuri_rezervate / NULLIF(so.capacitate_autobuz, 0)) * 100, 2) AS procent_ocupare,
+    CASE 
+        WHEN so.locuri_rezervate / NULLIF(so.capacitate_autobuz, 0) >= 0.9 THEN 'COMPLET'
+        WHEN so.locuri_rezervate / NULLIF(so.capacitate_autobuz, 0) >= 0.7 THEN 'BUN'
+        WHEN so.locuri_rezervate / NULLIF(so.capacitate_autobuz, 0) >= 0.5 THEN 'MEDIU'
+        ELSE 'SLAB'
+    END AS nivel_ocupare
+FROM (
+    SELECT 
+        c.cursa_id,
+        rt.nume_ruta AS ruta,
+        c.data_ora_plecare AS data_plecare,
+        COUNT(DISTINCT r.nr_loc) AS locuri_rezervate,      -- locuri diferite!
+        COUNT(r.rezervare_id) AS nr_rezervari_totale,      
+        a.total_locuri AS capacitate_autobuz
+    FROM Cursa c
+    JOIN Ruta rt ON c.ruta_id = rt.ruta_id
+    JOIN Autobuz a ON c.autobuz_id = a.autobuz_id
+    LEFT JOIN Rezervare r 
+        ON c.cursa_id = r.cursa_id 
+       AND r.status = 'rezervat'
+    GROUP BY 
+        c.cursa_id, 
+        rt.nume_ruta, 
+        c.data_ora_plecare, 
+        a.total_locuri
+) so
+WHERE so.data_plecare >= TRUNC(SYSDATE) - 30
+ORDER BY procent_ocupare DESC;
+
+2.Să se afișeze toți producătorii, chiar dacă nu au autobuze în flota, cu statistici despre curse și mentenanță.
+
+SELECT 
+    p.nume_producator,
+    p.tara_producator,
+    COUNT(DISTINCT a.autobuz_id) AS nr_autobuze,
+    COUNT(DISTINCT c.cursa_id) AS nr_curse_efectuate,
+    COUNT(DISTINCT m.mentenanta_id) AS nr_interventii,
+    NVL(SUM(m.cost), 0) AS cost_total_mentenanta,
+    CASE 
+        WHEN COUNT(DISTINCT a.autobuz_id) = 0 THEN 'Fara autobuze'
+        WHEN NVL(SUM(m.cost), 0) / NULLIF(COUNT(DISTINCT a.autobuz_id), 0) > 5000 THEN 'Cost ridicat'
+        WHEN NVL(SUM(m.cost), 0) / NULLIF(COUNT(DISTINCT a.autobuz_id), 0) > 2000 THEN 'Cost mediu'
+        ELSE 'Cost redus'
+    END AS categorie_cost
+FROM Autobuz a
+RIGHT JOIN Producator p ON a.producator_id = p.producator_id
+LEFT JOIN Cursa c ON a.autobuz_id = c.autobuz_id
+LEFT JOIN Mentenanta m ON a.autobuz_id = m.autobuz_id
+GROUP BY p.producator_id, p.nume_producator, p.tara_producator
+ORDER BY nr_autobuze DESC, cost_total_mentenanta DESC;
+
+
+
+3. Afișați top 3 cele mai scumpe rezervări, cu numele clientului și ruta, incluzând rezervările cu preț egal.
+
+SELECT nume_complet, pret, nume_ruta
+FROM (
+    SELECT 
+        c.nume_complet,
+        r.pret,
+        ru.nume_ruta,
+        DENSE_RANK() OVER (ORDER BY r.pret DESC) AS rk
+    FROM Client c
+    JOIN Rezervare r ON c.client_id = r.client_id
+    JOIN Cursa cu ON r.cursa_id = cu.cursa_id
+    JOIN Ruta ru ON cu.ruta_id = ru.ruta_id
+)
+WHERE rk <= 3;
+
+
+
+4. Să se găsească autobuzele care NU au curse planificate.
+
+SELECT 
+    a.autobuz_id,
+    a.nr_inmatriculare,
+    a.marca || ' ' || a.model AS model,
+    a.total_locuri,
+    CASE 
+        WHEN EXISTS (SELECT 1 FROM Mentenanta m 
+                     WHERE m.autobuz_id = a.autobuz_id 
+                     AND m.data_sfarsit >= SYSDATE - 30) 
+        THEN 'In mentenanta recent'
+        ELSE 'Disponibil - nealocat'
+    END AS status_detaliat
+FROM Autobuz a
+WHERE a.status = 'activ'
+  AND a.autobuz_id IN (
+      -- Toate autobuzele active
+      SELECT autobuz_id FROM Autobuz WHERE status = 'activ'
+      MINUS
+      -- eliminam cele cu curse planificate/ sau in derulare
+      SELECT DISTINCT autobuz_id FROM Cursa WHERE status = 'Planificata' or status = 'In desfasurare'
+  )
+ORDER BY a.nr_inmatriculare;
+
+5. Să se afișeze toate dotările, chiar dacă nu sunt montate pe niciun autobuz.
+
+SELECT 
+    d.nume_dotare,
+    COUNT(DISTINCT ad.autobuz_id) AS nr_autobuze_dotate,
+    CASE 
+        WHEN COUNT(DISTINCT ad.autobuz_id) = 0 THEN 'Neutilizata'
+        WHEN COUNT(DISTINCT ad.autobuz_id) >= 3 THEN 'Populara'
+        ELSE 'Standard'
+    END AS popularitate,
+    LISTAGG(a.nr_inmatriculare, ', ') WITHIN GROUP (ORDER BY a.nr_inmatriculare) AS autobuze
+FROM Autobuz_Dotare ad
+RIGHT JOIN Dotare d ON ad.dotare_id = d.dotare_id
+LEFT JOIN Autobuz a ON ad.autobuz_id = a.autobuz_id
+GROUP BY d.dotare_id, d.nume_dotare
+ORDER BY nr_autobuze_dotate DESC;
+
+6. Să se afișeze pentru fiecare rută numărul de rezervări și venitul total generat de pe urma acelei rute.
+
+SELECT 
+    UPPER(date_baza.nume_ruta) AS ruta_formatata,
+    date_baza.nr_rezervari,
+    date_baza.venit_total,
+    CASE 
+        WHEN date_baza.venit_total > (SELECT AVG(pret) * 2 FROM Rezervare) THEN 'Performanta Ridicata'
+        WHEN date_baza.venit_total > 0 THEN 'Standard'
+        ELSE 'Fara Incasari'
+    END AS status_performanta,
+    SUBSTR(date_baza.nume_ruta, 1, INSTR(date_baza.nume_ruta, ' -') - 1) AS punct_plecare_principal
+FROM (
+    SELECT 
+        r.nume_ruta, 
+        COUNT(rez.rezervare_id) AS nr_rezervari,
+        SUM(NVL(rez.pret, 0)) AS venit_total
+    FROM Ruta r
+    LEFT JOIN Cursa c ON r.ruta_id = c.ruta_id
+    LEFT JOIN Rezervare rez ON c.cursa_id = rez.cursa_id
+    GROUP BY r.nume_ruta
+) date_baza
+WHERE date_baza.venit_total > 0
+ORDER BY date_baza.venit_total DESC;
+
+
+7. Pentru fiecare oraș, să se afișeze o prescurtare din 3 caractere pentru acel oraș si să se afișeze numărul total de curse ce implică acel oraș.
+
+WITH Codificare_Statii AS (
+    -- generare cod 3 caractere
+    SELECT 
+        statie_id, 
+        oras,
+        UPPER(
+            NVL(
+                CASE
+                    -- Regula 1: LVC (Litera-Vocala-Consoana)
+                    WHEN REGEXP_LIKE(oras, '^[A-Za-z][AEIOUaeiou][^AEIOUaeiou]')
+                    THEN SUBSTR(oras, 1, 3)
+                    -- Regula 2: LCC (Litera-Consoana-Consoana)
+                    ELSE REGEXP_SUBSTR(oras, '^[A-Za-z][^AEIOUaeiou]{2}')
+                END,
+                SUBSTR(oras || 'XXX', 1, 3)
+            )
+        ) AS cod_tehnic
+    FROM Statie
+),
+Trafic_Curse AS (
+    SELECT 
+        rs.statie_id,
+        COUNT(c.cursa_id) AS nr_total_curse
+    FROM Ruta_Statie rs
+    JOIN Cursa c ON rs.ruta_id = c.ruta_id
+    GROUP BY rs.statie_id
+)
+SELECT 
+    cs.oras,
+    cs.cod_tehnic,
+    NVL(tc.nr_total_curse, 0) AS volum_trafic_curse,
+    -- o clasificare
+    CASE 
+        WHEN tc.nr_total_curse >= 3 THEN 'Hub Major'
+        WHEN tc.nr_total_curse BETWEEN 1 AND 2 THEN 'Statie Secundara'
+        ELSE 'Fara Trafic Curent'
+    END AS status_logistica
+FROM Codificare_Statii cs
+LEFT JOIN Trafic_Curse tc ON cs.statie_id = tc.statie_id
+ORDER BY volum_trafic_curse DESC, cs.oras ASC;
+
+8. Să se calculeze profitul lunar corelând totalul încasărilor din plăți cu totalul cheltuielilor de mentenanță.
+
+SELECT 
+    NVL(p_data.perioada, m_data.perioada) AS perioada_an_luna,
+    NVL(p_data.venituri, 0) AS total_venituri,
+    NVL(m_data.cheltuieli, 0) AS total_mentenanta,
+    NVL(p_data.venituri, 0) - NVL(m_data.cheltuieli, 0) AS profit_net
+FROM (
+    SELECT TO_CHAR(data_plata, 'YYYY-MM') AS perioada, SUM(suma) AS venituri 
+    FROM Plata 
+    GROUP BY TO_CHAR(data_plata, 'YYYY-MM')
+) p_data
+FULL OUTER JOIN (
+    SELECT TO_CHAR(data_inceput, 'YYYY-MM') AS perioada, SUM(cost) AS cheltuieli 
+    FROM Mentenanta 
+    GROUP BY TO_CHAR(data_inceput, 'YYYY-MM')
+) m_data ON p_data.perioada = m_data.perioada
+ORDER BY perioada_an_luna ASC;
+
+9. Să se creeze un raport unificat cu toate activitățile (rezervări, mentenanțe, curse) din luna ianuarie 2026.
+
+ SELECT 
+    'REZERVARE' AS tip_activitate,
+    TO_CHAR(r.data_rezervare, 'DD.MM.YYYY') AS data,
+    'Client: ' || c.nume_complet AS detalii,
+    r.pret AS valoare
+FROM Rezervare r
+JOIN Client c ON r.client_id = c.client_id
+WHERE r.data_rezervare >= TO_DATE('2026-01-01', 'YYYY-MM-DD')
+
+UNION ALL
+
+SELECT 
+    'MENTENANTA' AS tip_activitate,
+    TO_CHAR(m.data_inceput, 'DD.MM.YYYY') AS data,
+    'Autobuz: ' || a.nr_inmatriculare || ' - ' || m.tip_mentenanta AS detalii,
+    m.cost AS valoare
+FROM Mentenanta m
+JOIN Autobuz a ON m.autobuz_id = a.autobuz_id
+WHERE m.data_inceput >= TO_DATE('2026-01-01', 'YYYY-MM-DD')
+
+UNION ALL
+
+SELECT 
+    'CURSA' AS tip_activitate,
+    TO_CHAR(c.data_ora_plecare, 'DD.MM.YYYY') AS data,
+    'Ruta: ' || r.nume_ruta AS detalii,
+    NULL AS valoare
+FROM Cursa c
+JOIN Ruta r ON c.ruta_id = r.ruta_id
+WHERE c.data_ora_plecare >= TO_DATE('2026-01-01', 'YYYY-MM-DD')
+
+ORDER BY 2 DESC;       
+
+10. Pentru ruta "Iasi - Focsani - Buzau - Bucuresti", să se afișeze ierarhic toate stațiile în ordinea opririi.
+ 
+SELECT 
+    LEVEL AS nivel_statie,
+    LPAD(' ', (LEVEL-1)*2, '-') || s.nume AS statie_ierarhica,
+    s.oras,
+    rs.ordine_oprire,
+    r.nume_ruta
+FROM Ruta r
+JOIN Ruta_Statie rs ON r.ruta_id = rs.ruta_id
+JOIN Statie s ON rs.statie_id = s.statie_id
+WHERE r.ruta_id = 1 --ruta IASI-BUCURESTI
+START WITH rs.ordine_oprire = 1
+CONNECT BY PRIOR rs.ordine_oprire + 1 = rs.ordine_oprire 
+    AND PRIOR rs.ruta_id = rs.ruta_id
+ORDER SIBLINGS BY rs.ordine_oprire;
+
+11. Să se afișeze clienții care au rezervări pe cel puțin 2 rute diferite, cu detalii despre activitatea lor.
+
+SELECT 
+    c.client_id,
+    INITCAP(c.nume_complet) AS nume_client,
+    LOWER(c.email) AS email,
+    COUNT(DISTINCT cu.ruta_id) AS nr_rute_diferite,
+    COUNT(DISTINCT rez.cursa_id) AS nr_curse_diferite,
+    COUNT(rez.rezervare_id) AS total_rezervari,
+    NVL(SUM(rez.pret), 0) AS suma_totala_cheltuita,
+    ROUND(NVL(AVG(rez.pret), 0), 2) AS pret_mediu,
+    MIN(rez.pret) AS cea_mai_ieftina,
+    MAX(rez.pret) AS cea_mai_scumpa,
+    LISTAGG(DISTINCT r.nume_ruta, ' | ') WITHIN GROUP (ORDER BY r.nume_ruta) AS rute_folosite
+FROM Client c
+INNER JOIN Rezervare rez ON c.client_id = rez.client_id
+INNER JOIN Cursa cu ON rez.cursa_id = cu.cursa_id
+INNER JOIN Ruta r ON cu.ruta_id = r.ruta_id
+GROUP BY c.client_id, c.nume_complet, c.email
+HAVING COUNT(DISTINCT cu.ruta_id) >= 2
+ORDER BY nr_rute_diferite DESC, suma_totala_cheltuita DESC;
+
+12. Să se creeze un raport detaliat pentru cursa 1, incluzând toate rezervările și statistici.
+
+SELECT 
+    c.cursa_id,
+    r.nume_ruta,
+    TO_CHAR(c.data_ora_plecare, 'DD.MM.YYYY HH24:MI:SS') AS plecare,
+    a.nr_inmatriculare || ' (' || a.marca || ' ' || a.model || ')' AS autobuz,
+    s.nume || ' ' || s.prenume AS sofer,
+    (SELECT COUNT(DISTINCT nr_loc) FROM Rezervare WHERE cursa_id = c.cursa_id) AS locuri_ocupate_unice,
+    a.total_locuri,
+    a.total_locuri - (SELECT COUNT(DISTINCT nr_loc) FROM Rezervare WHERE cursa_id = c.cursa_id) AS locuri_libere,
+    (SELECT COUNT(*) FROM Rezervare WHERE cursa_id = c.cursa_id) AS nr_rezervari_total,
+    (SELECT NVL(SUM(pret), 0) FROM Rezervare WHERE cursa_id = c.cursa_id) AS venit_total,
+    CASE 
+        WHEN (SELECT COUNT(DISTINCT nr_loc) FROM Rezervare WHERE cursa_id = c.cursa_id) >= a.total_locuri 
+        THEN 'COMPLET'
+        WHEN (SELECT COUNT(DISTINCT nr_loc) FROM Rezervare WHERE cursa_id = c.cursa_id) >= a.total_locuri * 0.8 
+        THEN 'APROAPE COMPLET'
+        WHEN (SELECT COUNT(DISTINCT nr_loc) FROM Rezervare WHERE cursa_id = c.cursa_id) > 0 
+        THEN 'PARTIAL OCUPAT'
+        ELSE 'DISPONIBIL'
+    END AS status_ocupare
+FROM Cursa c
+INNER JOIN Ruta r ON c.ruta_id = r.ruta_id
+INNER JOIN Autobuz a ON c.autobuz_id = a.autobuz_id
+LEFT JOIN Sofer s ON c.sofer_id = s.sofer_id
+WHERE c.cursa_id = 1;
+
+13. Să se afișeze autobuzele cu exact aceleași dotări.
+
+WITH Dotari_Per_Autobuz AS (
+    SELECT 
+        a.autobuz_id,
+        a.nr_inmatriculare,
+        a.marca || ' ' || a.model AS model,
+        LISTAGG(d.nume_dotare, ',') WITHIN GROUP (ORDER BY d.nume_dotare) AS set_dotari,
+        COUNT(ad.dotare_id) AS nr_dotari
+    FROM Autobuz a
+    JOIN Autobuz_Dotare ad ON a.autobuz_id = ad.autobuz_id
+    JOIN Dotare d ON ad.dotare_id = d.dotare_id
+    GROUP BY a.autobuz_id, a.nr_inmatriculare, a.marca, a.model
+)
+SELECT 
+    d1.nr_inmatriculare AS autobuz_1,
+    d2.nr_inmatriculare AS autobuz_2,
+    d1.model AS model_1,
+    d2.model AS model_2,
+    d1.set_dotari AS dotari_identice,
+    d1.nr_dotari AS nr_dotari_comune,
+    'CONFIGURATIE IDENTICA' AS status
+FROM Dotari_Per_Autobuz d1
+JOIN Dotari_Per_Autobuz d2 ON d1.set_dotari = d2.set_dotari 
+                            AND d1.autobuz_id < d2.autobuz_id
+ORDER BY d1.nr_dotari DESC, d1.nr_inmatriculare;
+
+14. Să se realizeze un clasament pentru clienți, șoferi și rute, în funcție de valoarea totală a încasărilor generate. Pentru fiecare categorie, să se calculeze poziția în clasament folosind funcțiile analitice RANK(), DENSE_RANK() și ROW_NUMBER(), pentru a evidenția diferențele dintre acestea.
+
+WITH Rankings AS (
+    -- top clienti
+    SELECT 
+        'CLIENT' AS categorie,
+        1 AS tip_ordine,
+        cl.nume_complet AS nume,
+        COUNT(DISTINCT rez.rezervare_id) AS activitate,
+        NVL(SUM(rez.pret), 0) AS valoare_totala
+    FROM Client cl
+    LEFT JOIN Rezervare rez ON cl.client_id = rez.client_id
+    GROUP BY cl.client_id, cl.nume_complet
+
+    UNION ALL
+
+    -- top soferi
+    SELECT 
+        'SOFER' AS categorie,
+        2 AS tip_ordine,
+        s.nume || ' ' || s.prenume AS nume,
+        COUNT(DISTINCT c.cursa_id) AS activitate,
+        NVL(SUM(rez.pret), 0) AS valoare_totala
+    FROM Sofer s
+    LEFT JOIN Cursa c ON s.sofer_id = c.sofer_id
+    LEFT JOIN Rezervare rez ON c.cursa_id = rez.cursa_id
+    GROUP BY s.sofer_id, s.nume, s.prenume
+
+    UNION ALL
+
+    -- top rute
+    SELECT 
+        'RUTA' AS categorie,
+        3 AS tip_ordine,
+        r.nume_ruta AS nume,
+        COUNT(DISTINCT c.cursa_id) AS activitate,
+        NVL(SUM(rez.pret), 0) AS valoare_totala
+    FROM Ruta r
+    LEFT JOIN Cursa c ON r.ruta_id = c.ruta_id
+    LEFT JOIN Rezervare rez ON c.cursa_id = rez.cursa_id
+    GROUP BY r.ruta_id, r.nume_ruta
+),
+Clasament AS (
+    SELECT 
+        categorie AS tip,
+        tip_ordine,
+        nume,
+        activitate,
+        valoare_totala,
+        RANK() OVER (PARTITION BY categorie ORDER BY valoare_totala DESC) AS pozitie_categorie_rank,
+        DENSE_RANK() OVER (PARTITION BY categorie ORDER BY valoare_totala DESC) AS pozitie_categorie_dense_rank,
+        ROW_NUMBER() OVER (PARTITION BY categorie ORDER BY valoare_totala DESC) AS pozitie_categorie_row_number
+    FROM Rankings
+    WHERE valoare_totala > 0
+)
+SELECT *
+FROM Clasament
+WHERE pozitie_categorie_rank <= 3
+ORDER BY tip_ordine, pozitie_categorie_rank;
+
+15. Să se calculeze ce sumă s-a încasat prin fiecare metodă de plată și ce procent reprezintă aceasta din totalul vânzărilor.
+
+SELECT
+    DECODE(p.metoda_plata, 'Card Online', 'DIGITAL', 'Transfer', 'DIGITAL', 'CASH') AS tip_incasare,
+    p.metoda_plata,
+    SUM(NVL(p.suma, 0)) AS suma_incasata, 
+    ROUND((SUM(p.suma) / (SELECT SUM(suma) FROM Plata)) * 100, 2) || '%' AS pondere_total
+FROM Rezervare r
+LEFT JOIN Plata p ON r.rezervare_id = p.rezervare_id
+GROUP BY p.metoda_plata 
+HAVING SUM(p.suma) > 0
+ORDER BY pondere_total DESC;
